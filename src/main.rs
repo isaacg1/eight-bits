@@ -1,5 +1,5 @@
 #![feature(map_try_insert)]
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use integer_sqrt::IntegerSquareRoot;
 
@@ -18,10 +18,13 @@ enum Value {
     Plus(Key, Key),
     Minus(Key, Key),
     Times(Key, Key),
-    TimesShift(Key, Key, u8),
-    DivShift(Key, Key, u8),
     Div(Key, Key),
     Exp(Key, Key),
+    TimesShift(Key, Key, u8),
+    TimesShiftZero(Key, Key, u8),
+    DivShift(Key, Key, u8),
+    DivShiftZero(Key, Key, u8),
+    ExpShift(Key, u8),
     Dominated,
 }
 struct SearchParams {
@@ -33,6 +36,8 @@ struct SearchParams {
     skip_top: bool,
     mark_max: bool,
 }
+// TODO: Allow some rationals, e.g. 5/6, if they can be formed more efficiently
+// than numerator + denominator
 fn search(params: SearchParams) {
     let mut table: HashMap<Key, Value> = HashMap::new();
     let mut new_pairs = vec![];
@@ -106,6 +111,19 @@ fn search(params: SearchParams) {
                 };
                 new_pairs.push((new_key, value));
             }
+            if num1 < 16 {
+                for shift in 0..=4 {
+                    let base: u16 = 1 << (shift + 1);
+                    if let Some(num) = base.checked_pow(num1.into()) {
+                        let zeros = shift + key1.zeros;
+                        let ones = 1 + key1.ones;
+                        if zeros <= 4 && ones <= 4 {
+                            let new_key = Key { num, zeros, ones };
+                            new_pairs.push((new_key, Value::ExpShift(key1, shift)));
+                        }
+                    }
+                }
+            }
             for (&key2, value2) in &table {
                 if matches!(value2, Value::Dominated) {
                     continue;
@@ -123,8 +141,10 @@ fn search(params: SearchParams) {
                         if new_zeros > 4 {
                             continue;
                         }
+                        let mut mul_res = None;
                         if num1 % (1 << shift) == 0 {
-                            if let Some(num) = num1.checked_mul(num2).map(|res| res >> shift) {
+                            mul_res = num1.checked_mul(num2).map(|res| res >> shift);
+                            if let Some(num) = mul_res {
                                 let new_key = Key {
                                     num,
                                     zeros: new_zeros,
@@ -133,14 +153,43 @@ fn search(params: SearchParams) {
                                 new_pairs.push((new_key, Value::TimesShift(key1, key2, shift)));
                             }
                         }
+                        let mut div_res = None;
                         if num2 != 0 && num1 % num2 == 0 {
-                            if let Some(num) = (num1 / num2).checked_shl(shift.into()) {
+                            div_res = (num1 / num2).checked_shl(shift.into());
+                            if let Some(num) = div_res {
                                 let new_key = Key {
                                     num,
                                     zeros: new_zeros,
                                     ones: total_ones,
                                 };
                                 new_pairs.push((new_key, Value::DivShift(key1, key2, shift)));
+                            }
+                        }
+                        let leading = num2 >> shift;
+                        if leading > 0 && leading <= 4 {
+                            let leading_zeros =
+                                16 - leading.leading_zeros() as u8 - leading.count_ones() as u8;
+                            let newer_zeros = new_zeros - leading_zeros + leading as u8;
+                            let newer_ones = total_ones - leading.count_ones() as u8;
+                            if newer_zeros <= 4 && newer_ones <= 4 {
+                                if let Some(num) = mul_res {
+                                    let new_key = Key {
+                                        num,
+                                        zeros: newer_zeros,
+                                        ones: newer_ones,
+                                    };
+                                    new_pairs
+                                        .push((new_key, Value::TimesShiftZero(key1, key2, shift)))
+                                }
+                                if let Some(num) = div_res {
+                                    let new_key = Key {
+                                        num,
+                                        zeros: newer_zeros,
+                                        ones: newer_ones,
+                                    };
+                                    new_pairs
+                                        .push((new_key, Value::DivShiftZero(key1, key2, shift)))
+                                 }
                             }
                         }
                     }
@@ -172,6 +221,7 @@ fn search(params: SearchParams) {
         }
     }
     let mut max_len = 0;
+    let mut num_unfound = 0;
     'outer: for num in 0..=params.max_num {
         let mut found = false;
         let mut seen_top = HashSet::new();
@@ -183,35 +233,33 @@ fn search(params: SearchParams) {
                     if !matches!(value, Value::Dominated) {
                         if params.simple_print {
                             println!("{}: {}", key.num, value_to_string(*value, &table, false));
-                        } else {
-                            if !params.print_big || big_num(*value) > params.max_num {
-                                let top_str = value_to_top(*value);
-                                let was_new = seen_top.insert(top_str);
-                                if !params.skip_top || was_new {
-                                    let string = value_to_string(*value, &table, false);
-                                    let star = if params.mark_max && string.len() > max_len {
-                                        max_len = string.len();
-                                        " *"
-                                    } else {
-                                        ""
-                                    };
-                                    println!(
-                                        "{}; {},{}: {:<9} {}{}",
-                                        key.num,
-                                        key.zeros,
-                                        key.ones,
-                                        value_to_top(*value),
-                                        value_to_string(*value, &table, false),
-                                        star
-                                    );
-                                }
+                        } else if !params.print_big || big_num(*value) > params.max_num {
+                            let top_str = value_to_top(*value);
+                            let was_new = seen_top.insert(top_str);
+                            if !params.skip_top || was_new {
+                                let string = value_to_string(*value, &table, false);
+                                let star = if params.mark_max && string.len() > max_len {
+                                    max_len = string.len();
+                                    " *"
+                                } else {
+                                    ""
+                                };
+                                println!(
+                                    "{}; {},{}: {:<9} {}{}",
+                                    key.num,
+                                    key.zeros,
+                                    key.ones,
+                                    value_to_top(*value),
+                                    value_to_string(*value, &table, false),
+                                    star
+                                );
                             }
                         }
                         found = true;
                         if params.print_one {
                             continue 'outer;
                         } else {
-                            break
+                            break;
                         }
                     }
                 }
@@ -219,8 +267,10 @@ fn search(params: SearchParams) {
         }
         if !found && !params.print_big {
             println!("{} was not found", num);
+            num_unfound += 1;
         }
     }
+    println!("Unfound: {}. Total entries: {}", num_unfound, table.len());
 }
 fn value_to_string(value: Value, table: &HashMap<Key, Value>, wrap: bool) -> String {
     let unwrapped_string = match value {
@@ -278,6 +328,30 @@ fn value_to_string(value: Value, table: &HashMap<Key, Value>, wrap: bool) -> Str
                 )
             }
         }
+        Value::TimesShiftZero(key1, key2, shift) | Value::DivShiftZero(key1, key2, shift) => {
+            let value1 = *table.get(&key1).expect("Present");
+            let value2 = *table.get(&key2).expect("Present");
+            let str1 = value_to_string(value1, table, true);
+            let str2 = value_to_string(value2, table, true);
+            let shift = shift as usize;
+            let op = match value {
+                Value::TimesShiftZero(_, _, _) => '*',
+                Value::DivShiftZero(_, _, _) => '/',
+                _ => unreachable!(),
+            };
+            let leading = key2.num >> shift;
+            assert!(str2.len() > shift);
+            format!(
+                "{str1}{op}({}.{})",
+                vec!["0!+"; leading as usize].concat(),
+                &str2[str2.len() - shift..]
+            )
+        }
+        Value::ExpShift(key1, shift) => {
+            let value1 = *table.get(&key1).expect("Present");
+            let str1 = value_to_string(value1, table, true);
+            format!(".{}1^-{str1}", (0..shift).map(|_| '0').collect::<String>())
+        }
         _ => unimplemented!("{:?}", value),
     };
     if wrap && !matches!(value, Value::Direct(_)) {
@@ -319,23 +393,41 @@ fn value_to_top(value: Value) -> String {
                 )
             }
         }
+        Value::TimesShiftZero(key1, key2, shift) | Value::DivShiftZero(key1, key2, shift) => {
+            let str1 = key1.num.to_string();
+            let str2 = format!("{:b}", key2.num);
+            let shift = shift as usize;
+            let op = match value {
+                Value::TimesShiftZero(_, _, _) => '*',
+                Value::DivShiftZero(_, _, _) => '/',
+                _ => unreachable!(),
+            };
+            let leading = key2.num >> shift;
+            assert!(str2.len() > shift);
+            format!(
+                "{str1}{op}({}.{})",
+                vec!["0!+"; leading as usize].concat(),
+                &str2[str2.len() - shift..]
+            )
+        }
+
+        Value::ExpShift(key1, shift) => {
+            let str1 = key1.num.to_string();
+            format!(".{}1^-{str1}", (0..shift).map(|_| '0').collect::<String>())
+        }
         _ => unimplemented!("{:?}", value),
     }
 }
 fn big_num(value: Value) -> u16 {
     match value {
         Value::Direct(num) => num.into(),
-        Value::Factorial(key1) |
-        Value::DoubleFactorial(key1) |
-        Value::Sqrt(key1) => key1.num,
-        Value::Plus(key1, key2) |
-        Value::Minus(key1, key2) |
-        Value::Times(key1, key2) |
-        Value::Div(key1, key2) |
-        Value::Exp(key1, key2) => key1.num.max(key2.num),
-        Value::TimesShift(key1, _key2, _shift) | Value::DivShift(key1, _key2, _shift) => {
-            key1.num
-        }
+        Value::Factorial(key1) | Value::DoubleFactorial(key1) | Value::Sqrt(key1) => key1.num,
+        Value::Plus(key1, key2)
+        | Value::Minus(key1, key2)
+        | Value::Times(key1, key2)
+        | Value::Div(key1, key2)
+        | Value::Exp(key1, key2) => key1.num.max(key2.num),
+        Value::TimesShift(key1, _key2, _shift) | Value::DivShift(key1, _key2, _shift) => key1.num,
         _ => unimplemented!("{:?}", value),
     }
 }
