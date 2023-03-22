@@ -131,38 +131,38 @@ fn search(params: SearchParams) {
                 let num2 = key2.num;
                 let total_zeros = key1.zeros + key2.zeros;
                 let total_ones = key1.ones + key2.ones;
-                if total_zeros > 4 || total_ones > 4 {
-                    continue;
-                }
+                // TODO: Implicitly assumes that direct is never dominated away. But it can be.
+                // So pull this out and iterate directly over some interval.
                 if matches!(value2, Value::Direct(_)) {
                     for shift in 1..8u8 {
                         let extra_zeros = shift.saturating_sub(16 - num2.leading_zeros() as u8);
                         let new_zeros = total_zeros + extra_zeros;
-                        if new_zeros > 4 {
-                            continue;
-                        }
                         let mut mul_res = None;
                         if num1 % (1 << shift) == 0 {
                             mul_res = num1.checked_mul(num2).map(|res| res >> shift);
                             if let Some(num) = mul_res {
-                                let new_key = Key {
-                                    num,
-                                    zeros: new_zeros,
-                                    ones: total_ones,
-                                };
-                                new_pairs.push((new_key, Value::TimesShift(key1, key2, shift)));
+                                if new_zeros <= 4 && total_ones <= 4 {
+                                    let new_key = Key {
+                                        num,
+                                        zeros: new_zeros,
+                                        ones: total_ones,
+                                    };
+                                    new_pairs.push((new_key, Value::TimesShift(key1, key2, shift)));
+                                }
                             }
                         }
                         let mut div_res = None;
                         if num2 != 0 && num1 % num2 == 0 {
                             div_res = (num1 / num2).checked_shl(shift.into());
                             if let Some(num) = div_res {
-                                let new_key = Key {
-                                    num,
-                                    zeros: new_zeros,
-                                    ones: total_ones,
-                                };
-                                new_pairs.push((new_key, Value::DivShift(key1, key2, shift)));
+                                if new_zeros <= 4 && total_ones <= 4 {
+                                    let new_key = Key {
+                                        num,
+                                        zeros: new_zeros,
+                                        ones: total_ones,
+                                    };
+                                    new_pairs.push((new_key, Value::DivShift(key1, key2, shift)));
+                                }
                             }
                         }
                         let leading = num2 >> shift;
@@ -189,7 +189,7 @@ fn search(params: SearchParams) {
                                     };
                                     new_pairs
                                         .push((new_key, Value::DivShiftZero(key1, key2, shift)))
-                                 }
+                                }
                             }
                         }
                     }
@@ -197,24 +197,26 @@ fn search(params: SearchParams) {
                 if num1 < num2 {
                     continue;
                 }
-                let mut ops = vec![
-                    (num1.checked_pow(num2.into()), Value::Exp(key1, key2)),
-                    (num2.checked_pow(num1.into()), Value::Exp(key2, key1)),
-                    (num1.checked_add(num2), Value::Plus(key1, key2)),
-                    (num1.checked_sub(num2), Value::Minus(key1, key2)),
-                    (num1.checked_mul(num2), Value::Times(key1, key2)),
-                ];
-                if num2 != 0 && num1 % num2 == 0 {
-                    ops.push((Some(num1 / num2), Value::Div(key1, key2)));
-                }
-                for (maybe_num, value) in ops {
-                    if let Some(num) = maybe_num {
-                        let new_key = Key {
-                            num,
-                            zeros: total_zeros,
-                            ones: total_ones,
-                        };
-                        new_pairs.push((new_key, value))
+                if total_zeros <= 4 && total_ones <= 4 {
+                    let mut ops = vec![
+                        (num1.checked_pow(num2.into()), Value::Exp(key1, key2)),
+                        (num2.checked_pow(num1.into()), Value::Exp(key2, key1)),
+                        (num1.checked_add(num2), Value::Plus(key1, key2)),
+                        (num1.checked_sub(num2), Value::Minus(key1, key2)),
+                        (num1.checked_mul(num2), Value::Times(key1, key2)),
+                    ];
+                    if num2 != 0 && num1 % num2 == 0 {
+                        ops.push((Some(num1 / num2), Value::Div(key1, key2)));
+                    }
+                    for (maybe_num, value) in ops {
+                        if let Some(num) = maybe_num {
+                            let new_key = Key {
+                                num,
+                                zeros: total_zeros,
+                                ones: total_ones,
+                            };
+                            new_pairs.push((new_key, value))
+                        }
                     }
                 }
             }
@@ -306,9 +308,8 @@ fn value_to_string(value: Value, table: &HashMap<Key, Value>, wrap: bool) -> Str
         }
         Value::TimesShift(key1, key2, shift) | Value::DivShift(key1, key2, shift) => {
             let value1 = *table.get(&key1).expect("Present");
-            let value2 = *table.get(&key2).expect("Present");
             let str1 = value_to_string(value1, table, true);
-            let str2 = value_to_string(value2, table, true);
+            let str2 = format!("{:b}", key2.num);
             let shift = shift as usize;
             let op = match value {
                 Value::TimesShift(_, _, _) => '*',
@@ -330,9 +331,8 @@ fn value_to_string(value: Value, table: &HashMap<Key, Value>, wrap: bool) -> Str
         }
         Value::TimesShiftZero(key1, key2, shift) | Value::DivShiftZero(key1, key2, shift) => {
             let value1 = *table.get(&key1).expect("Present");
-            let value2 = *table.get(&key2).expect("Present");
             let str1 = value_to_string(value1, table, true);
-            let str2 = value_to_string(value2, table, true);
+            let str2 = format!("{:b}", key2.num);
             let shift = shift as usize;
             let op = match value {
                 Value::TimesShiftZero(_, _, _) => '*',
